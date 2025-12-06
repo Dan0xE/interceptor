@@ -1,0 +1,16 @@
+{
+    "name": "Example Mock Server",
+    "port": 8081,
+    "routes": [
+        {
+            "method": "GET",
+            "route": "/some/endpoint",
+            "response": "<xml>yo</xml>",
+            "status": 200,
+            "headers": {
+                "Authorization": "Bearer example",
+                "Content-Type": "application/xml; charset=utf-8"
+            }
+        }
+    ]
+}
