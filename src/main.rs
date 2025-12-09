@@ -8,6 +8,7 @@ mod utils;
 // TODO create UI for this
 // TODO make live reloading optional
 // TODO allow individual config files & folders
+// TODO create nicer terminal UI with ratatui or similiar(?)
 
 use clap::Parser;
 use std::path::PathBuf;
