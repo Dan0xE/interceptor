@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
@@ -14,13 +15,14 @@ use crate::config::ConfigFile;
 
 // TODO port collision detection?
 // TODO if yes, granually? (meaning yes, two configs can share the same port, _but_ not the same routes)
+// Support ? params for timeout / delay / amount of requests needed before response
 
 #[derive(thiserror::Error, Debug)]
 pub enum MockServerError {
     #[error("No instances are currently running.")]
     NoInstancesRunning,
     #[error("No matching instance found for the given input: {0}")]
-    NoMatchingInstance(String), // String is okay here as we can also use it for ints
+    NoMatchingInstance(String),
     #[error("Instance reported an error: {0}")]
     InstanceError(#[from] ServerInstanceError),
     #[error("Axum error occurred: {0}")]
@@ -77,36 +79,34 @@ impl ServerInstance {
         }
     }
 
-    // TODO do we really want to give back &mut Self here?
     pub async fn start(&mut self) -> ServerInstanceResult<&mut Self> {
         // This should basically bind to the port and start
         let port = self.config.port;
-        let config = self.config.routes.clone(); // TODO clone needed?
+        let routes = Arc::clone(&self.config.routes);
         let handle: JoinHandle<ServerInstanceResult<()>> = tokio::spawn(async move {
             let mut router = Router::new();
 
             // TODO we should allow specifying the IP itself
             let listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
 
-            for route in config.iter() {
+            for route in routes.iter() {
                 let method = route.method.to_uppercase();
-                let route_path = route.route.clone();
+                let route_path = Arc::clone(&route.route);
                 let response_body = route.response.clone();
                 let status_code = route.status;
                 let headers = route.headers.clone();
-
-                // TODO this is getting clunky, refactor
-                let path = route_path.clone();
+                let path_for_handler = Arc::clone(&route_path);
 
                 let handler = move || {
                     let body = response_body.clone();
                     let headers = headers.clone();
+                    let path = Arc::clone(&path_for_handler);
                     async move {
                         let mut response = Response::builder()
                             .status(status_code)
                             .body(Body::from(body))?;
 
-                        if let Some(hdrs) = headers {
+                        if let Some(hdrs) = headers.as_ref() {
                             for (key, value) in hdrs.iter() {
                                 response.headers_mut().insert(
                                     HeaderName::from_bytes(key.as_bytes())?,
@@ -117,7 +117,7 @@ impl ServerInstance {
 
                         info!(
                             "Handled request for route '{}' with status {}",
-                            path, status_code
+                            path.as_ref(), status_code
                         );
 
                         Ok::<_, ServerInstanceError>(response)
@@ -135,18 +135,16 @@ impl ServerInstance {
                     _ => {
                         warn!(
                             "Unsupported HTTP method '{}' for route '{}', skipping.",
-                            method, route_path
+                            method, route_path.as_ref()
                         );
                         continue;
                     }
                 };
 
-                router = router.route(&route_path, on(method_filter, handler));
+                router = router.route(route_path.as_ref(), on(method_filter, handler));
             }
 
             axum::serve(listener, router).await?;
-
-            // TODO what do we do if the spawn fails? more clarity
             Ok(())
         });
 
@@ -178,15 +176,18 @@ impl MockServer {
         }
     }
 
-    pub async fn start(&mut self, id: usize, config: &ConfigFile) -> MockServerResult<()> {
-        let mut instance = ServerInstance::create(id, config.clone());
+    pub async fn start(&mut self, id: usize, config: ConfigFile) -> MockServerResult<()> {
+        let name = config.name.clone();
+        let port = config.port;
+
+        let mut instance = ServerInstance::create(id, config);
         instance.start().await?;
 
         self.instances.get_or_insert(Vec::new()).push(instance);
 
         info!(
             "Started instance '{}' on port {} with ID {}",
-            config.name, config.port, id
+            name, port, id
         );
 
         Ok(())
@@ -210,16 +211,15 @@ impl MockServer {
     }
 
     pub async fn start_all(&mut self) -> MockServerResult<()> {
-        let configs: Vec<_> = self.configs.iter().cloned().enumerate().collect(); // TODO clone needed?
-        for (id, config) in configs {
-            self.start(id, &config).await?;
+        let configs = std::mem::take(&mut self.configs);
+        for (id, config) in configs.into_iter().enumerate() {
+            self.start(id, config).await?;
         }
 
         Ok(())
     }
 
     pub async fn stop_all(&mut self) -> MockServerResult<()> {
-        // TODO can be optimized
         let Some(ref instances) = self.instances else {
             return Err(MockServerError::NoInstancesRunning);
         };

@@ -2,7 +2,9 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use bytes::Bytes;
 use ignore::WalkBuilder;
 use tracing::{debug, info};
 
@@ -23,20 +25,66 @@ pub enum ConfigError {
 }
 
 #[derive(serde::Deserialize, Debug, Clone)]
+#[serde(from = "RouteConfigDe")]
 pub struct RouteConfig {
-    pub method: String,
-    pub route: String,
-    pub response: String,
+    pub method: Arc<str>,
+    pub route: Arc<str>,
+    pub response: Bytes,
     pub status: u16,
-    pub headers: Option<HashMap<String, String>>,
+    pub headers: Option<Arc<HashMap<String, String>>>,
 }
 
-#[derive(Debug, serde::Deserialize, Clone)]
-#[serde(default)]
+#[derive(serde::Deserialize)]
+struct RouteConfigDe {
+    method: String,
+    route: String,
+    response: String,
+    status: u16,
+    headers: Option<HashMap<String, String>>,
+}
+
+impl From<RouteConfigDe> for RouteConfig {
+    fn from(de: RouteConfigDe) -> Self {
+        RouteConfig {
+            method: de.method.into(),
+            route: de.route.into(),
+            response: Bytes::from(de.response),
+            status: de.status,
+            headers: de.headers.map(Arc::new),
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(from = "ConfigFileDe")]
 pub struct ConfigFile {
     pub name: String,
     pub port: u16,
-    pub routes: Vec<RouteConfig>,
+    pub routes: Arc<Vec<RouteConfig>>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct ConfigFileDe {
+    #[serde(default)]
+    name: String,
+    #[serde(default = "default_port")]
+    port: u16,
+    #[serde(default)]
+    routes: Vec<RouteConfig>,
+}
+
+fn default_port() -> u16 {
+    8080
+}
+
+impl From<ConfigFileDe> for ConfigFile {
+    fn from(de: ConfigFileDe) -> Self {
+        ConfigFile {
+            name: de.name,
+            port: de.port,
+            routes: Arc::new(de.routes),
+        }
+    }
 }
 
 impl Default for ConfigFile {
@@ -44,7 +92,7 @@ impl Default for ConfigFile {
         ConfigFile {
             name: "".to_string(),
             port: 8080,
-            routes: Vec::new(),
+            routes: Arc::new(Vec::new()),
         }
     }
 }
@@ -56,24 +104,22 @@ impl Default for ConfigFile {
 // - We want to support different config file formats (YAML, JSON, TOML, etc.)
 // - We want to allow the user to pass in multiple config dirs/files.
 //
-// NOTE For now we're going the route of treating everything in the dir as config files, except those ignored by .fakeignore and do so recursively.
+// NOTE For now we're going the route of treating everything in the dir as config files, except those ignored by .interceptorignore and do so recursively.
 // NOTE For now we're only supporting json files.
 
 /// The file extensions we support for configuration files.
 const FILE_EXTENSIONS: [&str; 1] = ["json"];
 
-// TODO async optimizations
-
 impl ConfigFile {
     // TODO separate methods (load from path, load from file?)
     /// Loads configuration files from the specified directory _or_ from the current working directory if None is provided.
     ///
-    /// The user can choose to ignore certain files _or_ directories by adding them to a `.fakeignore` file in the target directory.
+    /// The user can choose to ignore certain files _or_ directories by adding them to a `.interceptorignore` file in the target directory.
     ///
     ///
     pub fn load(dir: Option<PathBuf>) -> ConfigResult<Vec<Self>> {
         let config_dir = dir.map_or_else(std::env::current_dir, Ok)?;
-        let ignore_file = config_dir.join(".fakeignore");
+        let ignore_file = config_dir.join(".interceptorignore");
 
         let ignore_builder = WalkBuilder::new(config_dir)
             .add_custom_ignore_filename(ignore_file)
@@ -87,8 +133,6 @@ impl ConfigFile {
                 && let Some(ext) = entry.path().extension()
                 && FILE_EXTENSIONS.contains(&ext.to_string_lossy().to_lowercase().as_str())
             {
-                // TODO pretty sure this can be optimized
-                // TODO only show name from parent (config.json, subdir/config.json, etc.)
                 debug!("Found config file: {:?}", entry.path());
                 let path = entry.path().to_path_buf();
                 config_paths.push(path.to_string_lossy().to_string());
@@ -100,27 +144,21 @@ impl ConfigFile {
         for file in config_paths {
             debug!("Processing config file: {:?}", file);
             let content = std::fs::read_to_string(&file)?;
-            let serialized = serde_json::from_str::<ConfigFile>(&content)?;
-            let port = serialized.port;
-            let mut name = serialized.name.clone();
-            let routes = serialized.routes;
+            let mut serialized = serde_json::from_str::<ConfigFile>(&content)?;
 
-            if name.is_empty() {
+            if serialized.name.is_empty() {
                 if let Some(fname) = Path::new(&file).file_stem() {
-                    name = fname.to_string_lossy().to_string();
+                    serialized.name = fname.to_string_lossy().to_string();
                 } else {
                     let id = file_id();
-                    name = format!("unnamed_config_{}", id);
+                    serialized.name = format!("unnamed_config_{}", id);
                 }
             }
 
-            // TOOD clone needed?
-            configs_content.push(ConfigFile {
-                name: name.clone(),
-                port,
-                routes,
-            });
+            let name = &serialized.name;
+            let port = serialized.port;
             info!("Loaded config '{}' on port {}", name, port);
+            configs_content.push(serialized);
         }
 
         Ok(configs_content)

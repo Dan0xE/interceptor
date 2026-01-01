@@ -3,7 +3,6 @@ mod config;
 mod server;
 mod utils;
 
-// TODO remove clone as much as possible and restructure code accordingly
 // TODO create benchmarks, tests
 // TODO create UI for this
 // TODO make live reloading optional
